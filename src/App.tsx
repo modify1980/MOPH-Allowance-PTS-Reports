@@ -9,7 +9,26 @@ import OfficerList from "./components/OfficerList";
 import OfficerForm from "./components/OfficerForm";
 import ReportPreview from "./components/ReportPreview";
 import AppsScriptExport from "./components/AppsScriptExport";
-import { Users, FileText, UserPlus, CreditCard, Heart, ClipboardCheck, Sparkles, FileCode } from "lucide-react";
+import { 
+  Users, 
+  FileText, 
+  UserPlus, 
+  CreditCard, 
+  Heart, 
+  ClipboardCheck, 
+  Sparkles, 
+  FileCode,
+  Database,
+  AlertTriangle,
+  CheckCircle,
+  HelpCircle
+} from "lucide-react";
+import { 
+  isSupabaseConfigured, 
+  getOfficersFromSupabase, 
+  upsertOfficerToSupabase, 
+  deleteOfficerFromSupabase 
+} from "./lib/supabase";
 
 // Pre-seeded sample data matching the exact templates submitted by the user
 const SAMPLE_OFFICERS: Officer[] = [
@@ -50,45 +69,104 @@ export default function App() {
   const [activeView, setActiveView] = useState<"list" | "form" | "preview" | "export">("list");
   const [selectedOfficer, setSelectedOfficer] = useState<Officer | null>(null);
   const [editingOfficer, setEditingOfficer] = useState<Officer | null>(null);
+  
+  // Supabase states
+  const [dbStatus, setDbStatus] = useState<"not_configured" | "connecting" | "connected" | "error">("connecting");
+  const [dbErrorMsg, setDbErrorMsg] = useState<string>("");
 
-  // Load from local storage or pre-seed
+  // Load from Supabase with LocalStorage fallback
   useEffect(() => {
-    const saved = localStorage.getItem("moph_officers");
-    if (saved) {
-      try {
-        setOfficers(JSON.parse(saved));
-      } catch (e) {
-        setOfficers(SAMPLE_OFFICERS);
+    async function loadData() {
+      if (isSupabaseConfigured) {
+        setDbStatus("connecting");
+        try {
+          const dbOfficers = await getOfficersFromSupabase();
+          setOfficers(dbOfficers);
+          setDbStatus("connected");
+          // Mirror to localStorage
+          localStorage.setItem("moph_officers", JSON.stringify(dbOfficers));
+        } catch (err: any) {
+          console.error("Failed to connect to Supabase:", err);
+          setDbStatus("error");
+          setDbErrorMsg(err?.message || "เกิดข้อผิดพลาดในการเชื่อมต่อกับ Supabase");
+          
+          // Fallback to local storage
+          const saved = localStorage.getItem("moph_officers");
+          if (saved) {
+            try {
+              setOfficers(JSON.parse(saved));
+            } catch (e) {
+              setOfficers(SAMPLE_OFFICERS);
+            }
+          } else {
+            setOfficers(SAMPLE_OFFICERS);
+          }
+        }
+      } else {
+        setDbStatus("not_configured");
+        const saved = localStorage.getItem("moph_officers");
+        if (saved) {
+          try {
+            setOfficers(JSON.parse(saved));
+          } catch (e) {
+            setOfficers(SAMPLE_OFFICERS);
+          }
+        } else {
+          setOfficers(SAMPLE_OFFICERS);
+          localStorage.setItem("moph_officers", JSON.stringify(SAMPLE_OFFICERS));
+        }
       }
-    } else {
-      setOfficers(SAMPLE_OFFICERS);
-      localStorage.setItem("moph_officers", JSON.stringify(SAMPLE_OFFICERS));
     }
+    loadData();
   }, []);
 
-  const saveOfficers = (updatedOfficers: Officer[]) => {
-    setOfficers(updatedOfficers);
-    localStorage.setItem("moph_officers", JSON.stringify(updatedOfficers));
-  };
-
-  const handleSaveOfficer = (officer: Officer) => {
+  const handleSaveOfficer = async (officer: Officer) => {
+    const isEdit = !!editingOfficer;
     let updated: Officer[];
-    if (editingOfficer) {
-      // Edit mode
+    if (isEdit) {
       updated = officers.map(o => o.id === officer.id ? officer : o);
     } else {
-      // Add mode
       updated = [...officers, officer];
     }
-    saveOfficers(updated);
-    setEditingOfficer(null);
-    setActiveView("list");
+
+    if (isSupabaseConfigured && dbStatus === "connected") {
+      try {
+        await upsertOfficerToSupabase(officer);
+        setOfficers(updated);
+        localStorage.setItem("moph_officers", JSON.stringify(updated));
+        setEditingOfficer(null);
+        setActiveView("list");
+      } catch (err: any) {
+        console.error("Error saving to Supabase:", err);
+        alert("ไม่สามารถบันทึกข้อมูลไปยัง Supabase ได้: " + (err?.message || "กรุณาตรวจสอบสิทธิ์การเขียนข้อมูล"));
+      }
+    } else {
+      // Local fallback
+      setOfficers(updated);
+      localStorage.setItem("moph_officers", JSON.stringify(updated));
+      setEditingOfficer(null);
+      setActiveView("list");
+    }
   };
 
-  const handleDeleteOfficer = (id: string) => {
+  const handleDeleteOfficer = async (id: string) => {
     if (confirm("ยืนยันการลบรายชื่อบุคลากรรายนี้ออกจากฐานข้อมูล?")) {
       const updated = officers.filter(o => o.id !== id);
-      saveOfficers(updated);
+      
+      if (isSupabaseConfigured && dbStatus === "connected") {
+        try {
+          await deleteOfficerFromSupabase(id);
+          setOfficers(updated);
+          localStorage.setItem("moph_officers", JSON.stringify(updated));
+        } catch (err: any) {
+          console.error("Error deleting from Supabase:", err);
+          alert("ไม่สามารถลบข้อมูลจาก Supabase ได้: " + (err?.message || ""));
+        }
+      } else {
+        // Local fallback
+        setOfficers(updated);
+        localStorage.setItem("moph_officers", JSON.stringify(updated));
+      }
     }
   };
 
@@ -113,11 +191,40 @@ export default function App() {
               <Heart className="w-6 h-6 animate-pulse" />
             </div>
             <div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-lg font-bold text-slate-900 tracking-tight">MOPH Allowance & PTS Reports</h1>
                 <span className="bg-emerald-50 text-emerald-800 border border-emerald-100 text-[10px] font-bold px-2 py-0.5 rounded-full">
                   พ.ศ. 2566
                 </span>
+                
+                {/* Supabase Status Badges */}
+                {dbStatus === "connecting" && (
+                  <span className="bg-amber-50 text-amber-800 border border-amber-100 text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 shadow-sm animate-pulse">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                    กำลังเชื่อมต่อ Supabase...
+                  </span>
+                )}
+                {dbStatus === "connected" && (
+                  <span className="bg-teal-50 text-teal-800 border border-teal-100 text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 shadow-sm">
+                    <span className="w-1.5 h-1.5 rounded-full bg-teal-500"></span>
+                    เชื่อมต่อ Supabase สำเร็จ 🟢
+                  </span>
+                )}
+                {dbStatus === "error" && (
+                  <span 
+                    className="bg-rose-50 text-rose-800 border border-rose-100 text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 cursor-help shadow-sm"
+                    title={dbErrorMsg}
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
+                    Supabase ผิดพลาด (ใช้โหมดออฟไลน์) 🔴
+                  </span>
+                )}
+                {dbStatus === "not_configured" && (
+                  <span className="bg-slate-100 text-slate-600 border border-slate-200 text-[10px] font-bold px-2.5 py-0.5 rounded-full flex items-center gap-1 shadow-sm">
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-400"></span>
+                    โหมด Local (ออฟไลน์) 🟡
+                  </span>
+                )}
               </div>
               <p className="text-xs text-slate-500 font-medium">ระบบจัดทำเอกสารเบี้ยเลี้ยงเหมาจ่าย และ ค่าตอบแทน พ.ต.ส. ประจำเดือน</p>
             </div>
@@ -187,6 +294,74 @@ export default function App() {
               </div>
               {/* Decorative graphic background lines */}
               <div className="absolute right-0 top-0 bottom-0 w-1/3 opacity-10 bg-[radial-gradient(circle_at_right,rgba(255,255,255,0.4),transparent)] pointer-events-none"></div>
+            </div>
+
+            {/* Supabase Integration Helper Guide */}
+            <div className="bg-white rounded-2xl p-6 border border-slate-150 shadow-sm space-y-4">
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex items-center gap-2.5">
+                  <div className="p-2 bg-indigo-50 rounded-xl text-indigo-700">
+                    <Database className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-slate-900 text-sm">การเชื่อมต่อฐานข้อมูล Supabase 🗄️</h3>
+                    <p className="text-xs text-slate-500">ซิงก์ข้อมูลรายชื่อและประวัติบุคลากรแบบเรียลไทม์ผ่านคลาวด์</p>
+                  </div>
+                </div>
+                
+                {isSupabaseConfigured ? (
+                  <span className="bg-emerald-50 text-emerald-800 border border-emerald-100 text-xs font-semibold px-2.5 py-1 rounded-lg flex items-center gap-1">
+                    <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                    กำหนดค่าคีย์ในระบบแล้ว
+                  </span>
+                ) : (
+                  <span className="bg-amber-50 text-amber-800 border border-amber-100 text-xs font-semibold px-2.5 py-1 rounded-lg flex items-center gap-1">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                    ยังไม่ได้เชื่อมต่อระบบคลาวด์
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div className="space-y-2 bg-slate-50 p-4 rounded-xl border border-slate-100">
+                  <p className="font-semibold text-slate-800 flex items-center gap-1.5">
+                    <span className="w-4 h-4 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[10px]">1</span>
+                    ขั้นตอนการตั้งค่า Environment Variables
+                  </p>
+                  <ol className="list-decimal list-inside space-y-1 text-slate-600 pl-1">
+                    <li>เปิดเมนู <strong>Settings</strong> ของหน้าต่าง AI Studio</li>
+                    <li>เพิ่มตัวแปรลับ (Secrets) สองตัวดังนี้:</li>
+                    <li className="list-none pl-3 font-mono text-[10px] text-indigo-700">
+                      • <code className="bg-slate-200/65 px-1 py-0.5 rounded">VITE_SUPABASE_URL</code><br/>
+                      • <code className="bg-slate-200/65 px-1 py-0.5 rounded">VITE_SUPABASE_ANON_KEY</code>
+                    </li>
+                    <li>เมื่อใส่คีย์เสร็จแล้ว ระบบจะรีสตาร์ทและเชื่อมต่อฐานข้อมูลอัตโนมัติ!</li>
+                  </ol>
+                </div>
+
+                <div className="space-y-2 bg-slate-50 p-4 rounded-xl border border-slate-100 flex flex-col justify-between">
+                  <div>
+                    <p className="font-semibold text-slate-800 flex items-center gap-1.5">
+                      <span className="w-4 h-4 rounded-full bg-indigo-600 text-white flex items-center justify-center text-[10px]">2</span>
+                      สคริปต์สร้างตาราง SQL Schema
+                    </p>
+                    <p className="text-slate-600 pl-5 mt-1 leading-relaxed">
+                      คุณสามารถคัดลอกไฟล์สคริปต์ SQL ของเราไปวางในช่อง <strong>SQL Editor</strong> ของหน้าเว็บ Supabase เพื่อสร้างตาราง <code>officers</code> และเปิดใช้งาน Row Level Security (RLS) ได้ในคลิกเดียว
+                    </p>
+                  </div>
+                  <div className="pt-2 pl-5">
+                    <a
+                      href="/supabase_schema.sql"
+                      target="_blank"
+                      download="supabase_schema.sql"
+                      className="inline-flex items-center gap-1.5 text-indigo-700 hover:text-indigo-900 font-semibold underline"
+                    >
+                      <FileCode className="w-4 h-4" />
+                      เปิดดูไฟล์สคริปต์ SQL โครงสร้างฐานข้อมูล 🗄️
+                    </a>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <OfficerList
